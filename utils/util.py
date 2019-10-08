@@ -15,25 +15,25 @@ def setup_logging(log_dir):
     filemode = 'a' if exists(logpath) else 'w'
 
     # set up logging to file - see previous section for more details
-    logging.basicConfig(level=logging.DEBUG,
+    logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s %(message)s',
                         datefmt='%m-%d %H:%M:%S',
                         filename=logpath,
                         filemode=filemode)
     # define a Handler which writes INFO messages or higher to the sys.stderr
     console = logging.StreamHandler()
-    console.setLevel(logging.DEBUG)
+    console.setLevel(logging.INFO)
     # set a format which is simpler for console use
     formatter = logging.Formatter('%(asctime)s: %(levelname)-8s %(message)s')
     # tell the handler to use this format
     console.setFormatter(formatter)
     # add the handler to the root logger
-    logging.getLogger('').addHandler(console)
+    logging.getLogger('vae').addHandler(console)
 
 
 def prepare_results_dir(config):
     output_dir = join(config['results_root'], config['arch'],
-                      config['experiment_name'])
+                      config['experiment_name'], f"reconstruction_{str(config['reconstruction_coef']).replace('.', '_')}")
     if config['clean_results_dir']:
         if exists(output_dir):
             print('Attention! Cleaning results directory in 10 seconds!')
@@ -43,6 +43,9 @@ def prepare_results_dir(config):
     makedirs(join(output_dir, 'weights'), exist_ok=True)
     makedirs(join(output_dir, 'samples'), exist_ok=True)
     makedirs(join(output_dir, 'results'), exist_ok=True)
+    makedirs(join(output_dir, 'losses'), exist_ok=True)
+    makedirs(join(output_dir, 'samples', 'fixed'), exist_ok=True)
+
     return output_dir
 
 
@@ -60,10 +63,4 @@ def find_latest_epoch(dirpath):
 
 
 def cuda_setup(cuda=False, gpu_idx=0):
-    if cuda and torch.cuda.is_available():
-        device = torch.device('cuda')
-        torch.cuda.set_device(gpu_idx)
-    else:
-        device = torch.device('cpu')
-    return device
-
+    return torch.device('cuda' if cuda and torch.cuda.is_available() else 'cpu')

@@ -6,7 +6,10 @@ from datetime import datetime
 from importlib import import_module
 from itertools import chain
 from os.path import join, exists
+from tqdm import trange
 
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import torch
 import torch.backends.cudnn as cudnn
@@ -17,6 +20,8 @@ from torch.utils.data import DataLoader
 
 from utils.pcutil import plot_3d_point_cloud
 from utils.util import find_latest_epoch, prepare_results_dir, cuda_setup, setup_logging
+
+from losses.cramer_wold import cw_distance
 
 cudnn.benchmark = True
 
@@ -51,7 +56,7 @@ def main(config):
             json.dump(config, f)
 
     setup_logging(results_dir)
-    log = logging.getLogger(__name__)
+    log = logging.getLogger('vae')
 
     device = cuda_setup(config['cuda'], config['gpu'])
     log.debug(f'Device variable: {device}')
@@ -97,6 +102,9 @@ def main(config):
     elif config['reconstruction_loss'].lower() == 'earth_mover':
         from losses.earth_mover_distance import EMD
         reconstruction_loss = EMD().to(device)
+    elif config['reconstruction_loss'].lower() == 'cramer_wold':
+        from losses.cramer_wold import CWSample
+        reconstruction_loss = CWSample().to(device)
     else:
         raise ValueError(f'Invalid reconstruction loss. Accepted `chamfer` or '
                          f'`earth_mover`, got: {config["reconstruction_loss"]}')
@@ -126,96 +134,125 @@ def main(config):
         EG_optim.load_state_dict(torch.load(
             join(weights_path, f'{starting_epoch-1:05}_EGo.pth')))
 
-    for epoch in range(starting_epoch, config['max_epochs'] + 1):
-        start_epoch_time = datetime.now()
+    losses = []
 
-        G.train()
-        E.train()
+    with trange(starting_epoch, config['max_epochs'] + 1) as t:
+        for epoch in t:
+            start_epoch_time = datetime.now()
 
-        total_loss = 0.0
-        for i, point_data in enumerate(points_dataloader, 1):
-            log.debug('-' * 20)
+            G.train()
+            E.train()
 
-            X, _ = point_data
-            X = X.to(device)
+            total_loss = 0.0
+            losses_eg = []
+            losses_e = []
+            losses_kld = []
 
-            # Change dim [BATCH, N_POINTS, N_DIM] -> [BATCH, N_DIM, N_POINTS]
-            if X.size(-1) == 3:
-                X.transpose_(X.dim() - 2, X.dim() - 1)
+            for i, point_data in enumerate(points_dataloader, 1):
+                # log.debug('-' * 20)
 
-            codes, mu, logvar = E(X)
-            X_rec = G(codes)
+                X, _ = point_data
+                X = X.to(device)
 
-            loss_e = torch.mean(
-                config['reconstruction_coef'] *
-                reconstruction_loss(X.permute(0, 2, 1) + 0.5,
-                                    X_rec.permute(0, 2, 1) + 0.5))
+                # Change dim [BATCH, N_POINTS, N_DIM] -> [BATCH, N_DIM, N_POINTS]
+                if X.size(-1) == 3:
+                    X.transpose_(X.dim() - 2, X.dim() - 1)
 
-            loss_kld = -0.5 * torch.mean(
-                1 - 2.0 * torch.log(std_assumed) + logvar -
-                (mu.pow(2) + logvar.exp()) / torch.pow(std_assumed, 2))
+                codes, mu, logvar = E(X)
+                X_rec = G(codes)
 
-            loss_eg = loss_e + loss_kld
-            EG_optim.zero_grad()
-            E.zero_grad()
-            G.zero_grad()
+                loss_e = torch.mean(
+                    # config['reconstruction_coef'] *
+                    reconstruction_loss(X.permute(0, 2, 1) + 0.5,
+                                        X_rec.permute(0, 2, 1) + 0.5))
 
-            loss_eg.backward()
-            total_loss += loss_eg.item()
-            EG_optim.step()
+                loss_kld = config['reconstruction_coef'] * cw_distance(mu)
 
-            log.debug(f'[{epoch}: ({i})] '
-                      f'Loss_EG: {loss_eg.item():.4f} '
-                      f'(REC: {loss_e.item(): .4f}'
-                      f' KLD: {loss_kld.item(): .4f})'
-                      f' Time: {datetime.now() - start_epoch_time}')
+                # loss_kld = -0.5 * torch.mean(
+                #     1 - 2.0 * torch.log(std_assumed) + logvar -
+                #     (mu.pow(2) + logvar.exp()) / torch.pow(std_assumed, 2))
 
-        log.debug(
-            f'[{epoch}/{config["max_epochs"]}] '
-            f'Loss_G: {total_loss / i:.4f} '
-            f'Time: {datetime.now() - start_epoch_time}'
-        )
+                loss_eg = loss_e + loss_kld
+                EG_optim.zero_grad()
+                E.zero_grad()
+                G.zero_grad()
 
-        #
-        # Save intermediate results
-        #
-        G.eval()
-        E.eval()
-        with torch.no_grad():
-            fake = G(fixed_noise).data.cpu().numpy()
-            codes, _, _ = E(X)
-            X_rec = G(codes).data.cpu().numpy()
+                loss_eg.backward()
+                total_loss += loss_eg.item()
+                EG_optim.step()
 
-        for k in range(5):
-            fig = plot_3d_point_cloud(X[k][0], X[k][1], X[k][2],
-                                      in_u_sphere=True, show=False)
-            fig.savefig(
-                join(results_dir, 'samples', f'{epoch}_{k}_real.png'))
-            plt.close(fig)
+                losses_e.append(loss_e.item())
+                losses_kld.append(loss_kld.item())
+                losses_eg.append(loss_eg.item())
 
-        for k in range(5):
-            fig = plot_3d_point_cloud(fake[k][0], fake[k][1], fake[k][2],
-                                      in_u_sphere=True, show=False,
-                                      title=str(epoch))
-            fig.savefig(
-                join(results_dir, 'samples', f'{epoch:05}_{k}_fixed.png'))
-            plt.close(fig)
+                # log.debug
 
-        for k in range(5):
-            fig = plot_3d_point_cloud(X_rec[k][0],
-                                      X_rec[k][1],
-                                      X_rec[k][2],
-                                      in_u_sphere=True, show=False)
-            fig.savefig(join(results_dir, 'samples',
-                             f'{epoch}_{k}_reconstructed.png'))
-            plt.close(fig)
+                t.set_description(
+                    f'[{epoch}: ({i})] '
+                    f'Loss_EG: {loss_eg.item():.4f} '
+                    f'(REC: {loss_e.item(): .4f}'
+                    f' KLD: {loss_kld.item(): .4f})'
+                    f' Time: {datetime.now() - start_epoch_time}'
+                )
 
-        if epoch % config['save_frequency'] == 0:
-            torch.save(G.state_dict(), join(weights_path, f'{epoch:05}_G.pth'))
-            torch.save(E.state_dict(), join(weights_path, f'{epoch:05}_E.pth'))
+            t.set_description(
+                f'[{epoch}/{config["max_epochs"]}] '
+                f'Loss_G: {total_loss / i:.4f} '
+                f'Time: {datetime.now() - start_epoch_time}'
+            )
 
-            torch.save(EG_optim.state_dict(),
-                       join(weights_path, f'{epoch:05}_EGo.pth'))
+            losses.append([
+                np.mean(losses_e),
+                np.mean(losses_kld),
+                np.mean(losses_eg)
+            ])
+
+            #
+            # Save intermediate results
+            #
+            G.eval()
+            E.eval()
+            with torch.no_grad():
+                fake = G(fixed_noise).data.cpu().numpy()
+                codes, _, _ = E(X)
+                X_rec = G(codes).data.cpu().numpy()
+
+            X_numpy = X.cpu().numpy()
+            for k in range(5):
+                fig = plot_3d_point_cloud(X_numpy[k][0], X_numpy[k][1], X_numpy[k][2],
+                                          in_u_sphere=True, show=False)
+                fig.savefig(
+                    join(results_dir, 'samples', f'{epoch}_{k}_real.png'))
+                plt.close(fig)
+
+            for k in range(5):
+                fig = plot_3d_point_cloud(fake[k][0], fake[k][1], fake[k][2],
+                                          in_u_sphere=True, show=False,
+                                          title=str(epoch))
+                fig.savefig(
+                    join(results_dir, 'samples', 'fixed', f'{epoch:05}_{k}_fixed.png'))
+                plt.close(fig)
+
+            for k in range(5):
+                fig = plot_3d_point_cloud(X_rec[k][0],
+                                          X_rec[k][1],
+                                          X_rec[k][2],
+                                          in_u_sphere=True, show=False)
+                fig.savefig(join(results_dir, 'samples',
+                                 f'{epoch}_{k}_reconstructed.png'))
+                plt.close(fig)
+
+            if epoch % config['save_frequency'] == 0:
+                df = pd.DataFrame(losses, columns=['loss_e', 'loss_kld', 'loss_eg'])
+                df.to_json(join(results_dir, 'losses', 'losses.json'))
+                fig = df.plot.line().get_figure()
+                fig.savefig(join(results_dir, 'losses', f'{epoch:05}_{k}.png'))
+
+                torch.save(G.state_dict(), join(weights_path, f'{epoch:05}_G.pth'))
+                torch.save(E.state_dict(), join(weights_path, f'{epoch:05}_E.pth'))
+
+                torch.save(EG_optim.state_dict(),
+                           join(weights_path, f'{epoch:05}_EGo.pth'))
 
 
 if __name__ == '__main__':

@@ -1,10 +1,10 @@
 {
-    "experiment_name": "experiment",
-    "results_root": "/Users/maciek/test-results",
+    "experiment_name": "chamfer",
+    "results_root": "/gdrive/My Drive/UJ/Master/test-results",
     "clean_results_dir": false,
 
     "cuda": true,
-    "gpu": 3,
+    "gpu": 0,
 
     "reconstruction_loss": "chamfer",
 
@@ -12,17 +12,17 @@
     ],
 
     "dataset": "shapenet",
-    "data_dir": "/Users/maciek/shapenet",
+    "data_dir": "/content/shapenet",
     "classes": [],
     "shuffle": true,
     "transforms": ["rotate"],
     "num_workers": 8,
     "n_points": 2048,
 
-    "max_epochs": 2000,
+    "max_epochs": 100,
     "batch_size": 50,
     "gp_lambda": 10,
-    "reconstruction_coef": 0.05,
+    "reconstruction_coef": 0.2,
     "z_size": 2048,
     "distribution": "bernoulli",
 
@@ -37,7 +37,7 @@
     "save_frequency": 5,
     "epsilon": 0.001,
 
-    "arch": "avae",
+    "arch": "aae",
     "model": {
         "D": {
             "dropout": 0.5,
